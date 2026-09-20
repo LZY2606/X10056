@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -914,10 +915,33 @@ func NewSuppressedLoader[K comparable, V any](loader Loader[K, V], group *single
 // It also ensures that only one execution of the wrapped Loader's Load
 // method is in-flight for a given key at a time.
 func (l *SuppressedLoader[K, V]) Load(c *Cache[K, V], key K) *Item[K, V] {
+	// Keys that are not equal to themselves (e.g., NaN) can never be
+	// deduplicated: two such keys are always distinct, so suppressing
+	// their loads would merge unrelated requests. They are passed to
+	// the wrapped loader directly.
+	if key != key {
+		return l.loader.Load(c, key)
+	}
+
 	// there should be a better/generic way to create a
 	// singleflight Group's key. It's possible that a generic
 	// singleflight.Group will be introduced with/in go1.19+
-	strKey := fmt.Sprintf("%T", key)
+	//
+	// The key must identify both the (dynamic) type and the value of
+	// the cache key: %T pins the type, while %#v renders the value in
+	// Go syntax, ignoring Stringer implementations that may map
+	// distinct values to the same text.
+	strKey := fmt.Sprintf("%T|%#v", key, key)
+
+	// Pointer-like keys are identified by their address: two distinct
+	// pointers may point to equal values and thus render identically,
+	// even though they are different cache keys.
+	if v := reflect.ValueOf(key); v.IsValid() {
+		switch v.Kind() {
+		case reflect.Ptr, reflect.Chan, reflect.UnsafePointer:
+			strKey = fmt.Sprintf("%s|%#x", strKey, v.Pointer())
+		}
+	}
 
 	// the error can be discarded since the singleflight.Group
 	// itself does not return any of its errors, it returns
